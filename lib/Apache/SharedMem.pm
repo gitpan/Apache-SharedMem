@@ -1,5 +1,5 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.20 2001/06/26 21:09:46 rs Exp $
+#$Id: SharedMem.pm,v 1.23 2001/06/27 09:11:29 rs Exp $
 
 =pod
 
@@ -62,11 +62,11 @@ BEGIN
     %Apache::SharedMem::EXPORT_TAGS = 
     (
         'all'   => [qw(
-                       LOCK_EX LOCK_SH LOCK_UN LOCK_NB WAIT NOWAIT
+                       LOCK_EX LOCK_SH LOCK_UN LOCK_NB
                        WAIT NOWAIT
                        SUCCESS FAILURE
                    )],
-        'lock'  => [qw(LOCK_EX LOCK_SH LOCK_UN LOCK_NB WAIT NOWAIT)], 
+        'lock'  => [qw(LOCK_EX LOCK_SH LOCK_UN LOCK_NB)], 
         'wait'  => [qw(WAIT NOWAIT)],
         'status'=> [qw(SUCCESS FAILURE)],
     );
@@ -77,7 +77,7 @@ BEGIN
     use constant SUCCESS    => 1;
     use constant FAILURE    => 0;
 
-    $Apache::SharedMem::VERSION = '0.03';
+    $Apache::SharedMem::VERSION = '0.04';
 }
 
 =pod
@@ -261,7 +261,7 @@ sub delete
     my $self = shift;
     my $key  = defined($_[0]) ? shift : croak('Not enough arguments for delete method');
     my $wait = defined($_[0]) ? shift : (shift, 1);
-    croak('Too many arguments for delete method');
+    croak('Too many arguments for delete method') if(@_);
     $self->_unset_error;
 
     $self->_debug("$key ", $wait ? '(wait)' : '(no wait)');
@@ -295,7 +295,7 @@ sub delete
    
     $self->lock($out_lock);
 
-    $self->set_status(SUCCESS);
+    $self->_set_status(SUCCESS);
     # like a real delete
     return($rv);
 }
@@ -605,8 +605,9 @@ sub _smart_lock
       && ($type eq LOCK_EX || $type eq (LOCK_EX|LOCK_NB)))
     {
         # the current lock is less powerfull than targeted lock type
-        $self->_debug("locking type $type, return $self->{_lock_status}");
-        return($self->lock($type), $self->{_lock_status});
+        my $old_lock = $self->{_lock_status};
+        $self->_debug("locking type $type, return $old_lock");
+        return($self->lock($type), $old_lock);
     }
 
     $self->_debug("live lock untouch, return $self->{_lock_status}");
@@ -840,4 +841,4 @@ Foundation, Inc. :
 
 =head1 COPYRIGHT
 
-Copyright (C) 2001 - Olivier Poitrey E<lt>rs@rhapsodyk.netE<gt>
+Copyright (C) 2001 - Fininfo http://www.fininfo.fr

@@ -3,4 +3,6 @@ Makefile.PL
 MANIFEST
 README
 lib/Apache/SharedMem.pm
-t/load.t
+t/assign.t
+t/import.t
+t/smartlock.t
