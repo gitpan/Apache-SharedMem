@@ -1,5 +1,10 @@
 Revision history for Perl module Apache::SharedMem.
 
+0.06 ??
+    - Correction of an "undefined value" bug when lock method was called without
+      arguments.
+    - Forcing default lock to LOCK_EX
+
 0.05 Tue Jully  03, 2001 17:41:30
     - Implementation of timeout in lock method and integration of it in all
       public methods

@@ -1,11 +1,11 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.28 2001/07/03 14:53:02 rs Exp $
+#$Id: SharedMem.pm,v 1.34 2001/08/08 14:15:07 rs Exp $
 
 =pod
 
 =head1 NAME
 
-Apache::SharedMem - Share data between Apache children prcesses through the shared memory
+Apache::SharedMem - Share data between Apache children processes through the shared memory
 
 =head1 SYNOPSIS
 
@@ -37,17 +37,17 @@ Apache::SharedMem - Share data between Apache children prcesses through the shar
 
 =head1 DESCRIPTION
 
-This module make it easier to share data between Apache children processes trough the shared memory.
-This module internal working is a lot inspired by IPC::SharedCache, but without any cache managment.
-The share memory segment key is automatically deduced by the caller package, that's mine 2 modules
-can use same keys without be concerned about namespace clash.
+This module make it easier to share data between Apache children processes through the shared memory.
+This module internal functionment is a lot inspired from IPC::SharedCache, but without any cache managment.
+The share memory segment key is automatically deduced by the caller package, that's means 2 modules
+can use same keys without being concerned about namespace clash.
 
 This module handles all shared memory interaction use the IPC::SharedLite module and all data 
 serialization using Storable. See L<IPC::ShareLite> and L<Storable> for details.
 
 =head1 USAGE
 
-in construction
+under construction
 
 =cut
 
@@ -79,7 +79,7 @@ BEGIN
     use constant SUCCESS    => 1;
     use constant FAILURE    => 0;
 
-    $Apache::SharedMem::VERSION = '0.05';
+    $Apache::SharedMem::VERSION = '0.06';
 }
 
 =pod
@@ -92,16 +92,16 @@ rootname (optional): change the default root name segment identifier (default: T
 
 namespace (optional): setup manually the package name (default: caller package name).
 
-ipc_mode (optional): setup manually segment mode (see IPC::ShareLite man page) (default: 0666).
+ipc_mode (optional): setup manually the segment mode (see IPC::ShareLite man page) (default: 0666).
 
-ipc_segment_size (optional): setup manually segment size (see IPC::ShareLite man page) (default: 65_536).
+ipc_segment_size (optional): setup manually the segment size (see IPC::ShareLite man page) (default: 65_536).
 
 debug (optional): turn on/off debug mode (default: 0)
 
-In most case, you don't need to give any arguments to the constructor. But for some resons, (like share
-the same namespace between 2 modules) you can setup some parameters manually.
+In most case, you don't need to give any arguments to the constructor. But for some reasons, (like, for
+example, sharing the same namespace between 2 modules) you can setup some parameters manually.
 
-Note that ipc_segment_size is 
+Note that C<ipc_segment_size> is default value of IPC::ShareLite, see L<IPC::ShareLite>
 
 =cut
 
@@ -160,7 +160,7 @@ wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking shared loc
 
 timeout (optional): if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
 
-Try to get element C<key> from the shared segment. On failure, this methode return C<undef()> and set status to FAILURE.
+Try to get an element C<key> from the shared segment. In case of failure, this methode returns C<undef()> and set status to FAILURE.
 
 status: SUCCESS FAILURE
 
@@ -215,13 +215,13 @@ if($object->status eq FAILURE)
 
 key (required): key to set
 
-value (required): value a store in key
+value (required): store a value in key
 
 wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking shared lock (need :wait tag import).
 
 timeout (optional): if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
 
-Try to set element C<key> to C<value> from the shared segment. On failure, this methode return C<undef()>.
+Try to set element C<key> to C<value> from the shared segment. In case of failure, this methode return C<undef()>.
 
 status: SUCCESS FAILURE
 
@@ -520,15 +520,16 @@ lock_type (optional): type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
 
 timeout (optional): time to wait for an exclusive lock before aborting
 
-get a lock on the root share segment. return undef on failure, 1 on success.
+get a lock on the root share segment. It returns C<undef()> if failed, 1 if successed.
 
 =cut
 
 sub lock
 {
     my($self, $type, $timeout) = @_;
-    $self->_debug("type $type", defined $timeout ? ", timeout $timeout" : '');
+    $self->_debug("type ", (defined $type ? $type : 'default'), defined $timeout ? ", timeout $timeout" : '');
     my $rv = $self->_lock($type, $timeout, $self->{namespace});
+    # we keep a trace of the actual lock status for smart lock mecanisme
     $self->{_lock_status} = $type if($self->status eq SUCCESS);
     return($rv);
 }
@@ -542,7 +543,7 @@ sub _lock
     $self->_unset_error;
 
     $timeout = 0 if(!defined $timeout || $timeout =~ /\D/ || $timeout < 0);
-    return($self->unlock) if($type eq LOCK_UN); # strang bug, LOCK_UN, seem not to be same as unlock for IPC::ShareLite... 
+    return($self->unlock) if(defined $type && $type eq LOCK_UN); # strang bug, LOCK_UN, seem not to be same as unlock for IPC::ShareLite... 
 
     # get a lock
     my $rv;
@@ -550,7 +551,7 @@ sub _lock
     {
         local $SIG{ALRM} = sub {die "timeout"};
         alarm $timeout;
-        $rv = $ipc_obj->lock($type);
+        $rv = $ipc_obj->lock(defined $type ? $type : LOCK_EX);
         alarm 0;
     };
     if($@ || !$rv)
@@ -601,7 +602,7 @@ sub _unlock
 
 =head2 error
 
-return the last happened error message.
+return the last error message that happened.
 
 =cut
 
@@ -872,9 +873,36 @@ Foundation, Inc. :
 
 Copyright (C) 2001 - Fininfo http://www.fininfo.fr
 
+=head1 PREREQUISITES
+
+L<Apache::SharedMem> needs L<IPC::ShareLite>, L<Storable> both available from the CPAN.
+
+=head1 SEE ALSO
+
+L<IPC::ShareLite>, L<IPC::SharedMem>, shmget
+
 =head1 HISTORY
 
 $Log: SharedMem.pm,v $
+Revision 1.34  2001/08/08 14:15:07  rs
+forcing default lock to LOCK_EX
+
+Revision 1.33  2001/08/08 14:01:45  rs
+grrr syntax error second part, it's not my day.
+
+Revision 1.32  2001/08/08 13:59:01  rs
+syntax error introdius with the last fix
+
+Revision 1.31  2001/08/08 13:56:35  rs
+Starting version 0.06
+fixing an "undefined value" bug in lock methode
+
+Revision 1.30  2001/07/04 08:41:11  rs
+major documentation corrections
+
+Revision 1.29  2001/07/03 15:24:19  rs
+fix doc
+
 Revision 1.28  2001/07/03 14:53:02  rs
 make a real changes log
 
