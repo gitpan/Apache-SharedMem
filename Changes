@@ -1,5 +1,10 @@
 Revision history for Perl module Apache::SharedMem.
 
+0.08 Tue Oct  2, 2001 16:19:08
+    - status() now return bitmask values.
+    - get() method can know return undef() when value in undefined instead of void string.
+    - Bugfix in test scripts: don't failed if PWD environment variable isn't set.
+
 0.07 Mon August 27, 2001 18:36:52
     - Implement a more efficient IPC key generation for the root segment, using
       the system ftok() function provied by IPC::SysV module

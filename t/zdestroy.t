@@ -7,6 +7,14 @@ BEGIN
     plan tests => 3;
 }
 
+# under some configuration, PWD isn't defined
+unless(defined $ENV{PWD} || $ENV{PWD} ne '')
+{
+    print STDERR "Your \$PWD environment variable is unset, I fix this.\n";
+    my $pwd = `pwd`;
+    chomp($pwd);
+    $ENV{PWD} = $pwd;
+}
 
 package Test1;
 use Apache::SharedMem qw(:status);

@@ -1,5 +1,5 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.49 2001/08/29 08:30:32 rs Exp $
+#$Id: SharedMem.pm,v 1.60 2001/10/02 09:40:32 rs Exp $
 
 =pod
 
@@ -9,27 +9,30 @@ Apache::SharedMem - Share data between Apache children processes through the sha
 
 =head1 SYNOPSIS
 
-    use Apache::SharedMem qw(:lock :wait :status);
+    use Apache::SharedMem qw(:lock :status);
 
     my $share = new Apache::SharedMem || die($Apache::SharedMem::ERROR);
 
-    $share->set(key=>'some data');
+    $share->set(key => 'some data');
 
-    # ...in another process
-    my $var = $share->get(key, NOWAIT);
-    die("can't get key: ", $self->error) unless($share->status eq SUCCESS);
+    # ...maybe in another apache child
+    my $var = $share->get(key);
 
     $share->delete(key);
 
+    # delete all keys if the total size is larger than $max_size
     $share->clear if($share->size > $max_size);
 
+    # using an exclusive blocking lock, but with a timeout
     my $lock_timeout = 40; # seconds
     if($share->lock(LOCK_EX, $lock_timeout))
     {
-        my $data...
+        my $data =...
         ...some traitement...
-        $share->set(key=>$data);
-        warn(...) if($share->status eq FAILURE);
+        
+        $share->set(key => $data); # the implicite lock is not overrided
+        warn('failed to store data in shared memory') if($share->status & FAILURE);
+
         $share->unlock;
     }
     
@@ -61,7 +64,12 @@ and in your startup.pl:
 
 This allow Apache::SharedMem to determine a unique rootkey for all virtual hosts,
 and to cleanup this rootkey on Apache stop. PROJECT_DOCUMENT_ROOT is used instead of a
-per virtal host's DOCUMENT_ROOT for generating the rootkey.
+per virtal host's DOCUMENT_ROOT for rootkey's generation.
+
+You can also provide a PROJECT_ID, it's the server's uid by default. This value have to
+be numeric:
+
+    PerlAddVar PROJECT_ID 10
 
 =cut
 
@@ -92,13 +100,13 @@ BEGIN
     use constant WAIT       => 1;
     use constant NOWAIT     => 0;
     use constant SUCCESS    => 1;
-    use constant FAILURE    => 0;
+    use constant FAILURE    => 2;
 
     # default values
     use constant IPC_MODE   => 0600; 
     use constant IPC_SEGSIZE=> 65_536;
 
-    $Apache::SharedMem::VERSION  = '0.07';
+    $Apache::SharedMem::VERSION  = '0.08';
 }
 
 # main
@@ -124,7 +132,11 @@ BEGIN
 
 =head2 new  (namespace => 'Namespace', ipc_mode => 0666, ipc_segment_size => 1_000, debug => 1)
 
-C<rootkey> (optional) integer:
+=over 4
+
+=item *
+
+C<rootkey> optional, integer
 
 Changes the root segment key. It must be an unsigned integer. Don't use this 
 option unless you really know what you are doing. 
@@ -140,25 +152,35 @@ Note, if you are using mod_perl, and you'v load mod_perl via startup.pl
 (see USAGE section for more details), the rootkey is generated once at the apache 
 start, based on the supplied PROJECT_DOCUMENT_ROOT and Apache's uid.
 
-C<namespace> (optional) string: 
+=item *
+
+C<namespace> optional, string
 
 Setup manually the namespace. To share same datas, your program must use the same 
 namespace. This namespace is set by default to the caller's package name. In most
 cases the default value is a good choice. But you may setup manually this value if,
 for example, you want to share the same datas between two or more modules. 
 
-C<ipc_mode> (optional) octal:
+=item *
+
+C<ipc_mode> optional, octal
 
 Setup manually the segment mode (see L<IPC::ShareLite>) for more details (default: 0600).
 Warning: this value _must_ be octal, see chmod documentation in perlfunc manpage for more details.
 
-C<ipc_segment_size> (optional) integer:
+=item *
+
+C<ipc_segment_size> optional, integer
 
 Setup manually the segment size (see L<IPC::ShareLite>) for more details (default: 65_536).
 
-C<debug> (optional) boolean:
+=item *
+
+C<debug> optional, boolean
 
 Turn on/off the debug mode (default: 0)
+
+=back
 
 In most case, you don't need to give any arguments to the constructor.
 
@@ -169,6 +191,9 @@ has no effect.
 Note that C<ipc_segment_size> is default value of IPC::ShareLite, see
 L<IPC::ShareLite> 
 
+On succes return an Apache::SharedMem object, on error, return undef().
+You can get error string via $Apache::SharedMem::ERROR.
+
 =cut
 
 sub new 
@@ -178,8 +203,8 @@ sub new
 
     my $options = $self->{options} =
     {
-        rootname            => undef, # obsolete, use rootkey insted
-        rootkey             => undef,
+        rootname            => undef, # obsolete, use rootkey instead
+        rootkey             => undef, # if not spécified, take the rootname value if exists or _get_rootkey()
         namespace           => (caller())[0],
         ipc_mode            => IPC_MODE,
         ipc_segment_size    => IPC_SEGSIZE,
@@ -201,6 +226,7 @@ sub new
     if($options->{rootname})
     {
         carp('obsolete parameter: rootname');
+        # delete rootname parameter and if rootkey is undefined, copy the old rootname value in it.
         (defined $options->{rootkey} ? my $devnull : $options->{rootkey}) = delete($options->{rootname});
     }
 
@@ -225,17 +251,23 @@ sub new
 =head2 get  (key, [wait, [timeout]])
 
 my $var = $object->get('mykey', WAIT, 50);
-if($object->status eq FAILURE)
+if($object->status & FAILURE)
 {
     die("can't get key 'mykey´: " . $object->error);
 }
 
-key (required) string: 
+=over 4
+
+=item *
+
+C<key> required, string
 
 This is the name of elemenet that you want get from the shared namespace. It can be any string that perl
 support for hash's key.
 
-wait (optional):
+=item *
+
+C<wait> optional
 
 Defined the locking status of the request. If you must get the value, and can't continue without it, set
 this argument to constant WAIT, unless you can set it to NOWAIT. 
@@ -252,9 +284,14 @@ timeout (optional) integer:
 if WAIT is on, timeout setup the number of seconds to wait for a blocking lock, usefull for preventing 
 dead locks.
 
-Following status can be set:
+=back
+
+Following status can be set (needs :status tag import):
 
 SUCCESS FAILURE
+
+On error, method return undef(), but undef() is also a valid answer, so don't test the method status
+by this way, use ($obj->status & SUCCESS) instead.
 
 =cut
 
@@ -285,7 +322,7 @@ sub get
     if(exists $share->{$key})
     {
         $self->_set_status(SUCCESS);
-        return(defined($share->{$key}) ? $share->{$key} : '');
+        return($share->{$key}); # can be undef() !
     }
     else
     {
@@ -305,17 +342,37 @@ if($object->status eq FAILURE)
     die("can't set key 'mykey´: " . $object->error);
 }
 
-key (required): key to set
+Try to set element C<key> to C<value> from the shared segment.
 
-value (required): store a value in key
+=over 4
 
-wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking shared lock (need :wait tag import).
+=item *
 
-timeout (optional): if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
+C<key> required
 
-Try to set element C<key> to C<value> from the shared segment. In case of failure, this methode return C<undef()>.
+name of place where to store the value
 
-status: SUCCESS FAILURE
+=item *
+
+C<value> required
+
+data to store
+
+=item *
+
+C<wait> optional
+
+WAIT or NOWAIT (default WAIT) make or not a blocking shared lock (need :wait tag import).
+
+=item *
+
+C<timeout> optional
+
+if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
+
+=back
+
+return status: SUCCESS FAILURE
 
 =cut
 
@@ -637,7 +694,7 @@ sub destroy
     {
         $self->_debug("release namespace: $ns");
         $self->release($ns);
-        $err++ unless($self->status == SUCCESS);
+        $err++ unless($self->status & SUCCESS);
     }
     $self->_set_status($err ? FAILURE : SUCCESS);
 }
@@ -721,11 +778,25 @@ sub dump
 
 =head2 lock ([lock_type, [timeout]])
 
-lock_type (optional): type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
-
-timeout (optional): time to wait for an exclusive lock before aborting
-
 get a lock on the share segment. It returns C<undef()> if failed, 1 if successed.
+
+=over 4
+
+=item *
+
+C<lock_type> optional
+
+type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
+
+=item *
+
+C<timeout> optional
+
+time to wait for an exclusive lock before aborting
+
+=back
+
+return status: FAILURE SUCCESS
 
 =cut
 
@@ -813,6 +884,28 @@ return the last error message that happened.
 
 sub error  { return($_[0]->{__last_error__}); }
 
+=pod
+
+=head2 status
+
+Return the last called method status. This status should be used with bitmask operators
+&, ^, ~ and | like this :
+
+    # is last method failed ?
+    if($object->status & FAILURE) {something to do on failure}
+
+    # is last method don't succed ?
+    if($object->status ^ SUCCESS) {something to do on failure}
+
+It's not recommended to use equality operator (== and !=) or (eq and ne), they may don't
+work in future versions.
+
+To import status' constants, you have to use the :status import tag, like below :
+
+    use Apache::SharedMem qw(:status);
+
+=cut
+
 sub status { return($_[0]->{__status__}); }
 
 sub _smart_lock
@@ -869,7 +962,7 @@ sub _init_root
     if(defined $root)
     {
         # we have found an existing root
-        $Apache::SharedMem::ROOTKEYS{$self->{root} = $root} = 1;
+        $self->{root} = $root;
         $self->_root_lock(LOCK_SH);
         $record = $self->_get_root;
         $self->_root_unlock;
@@ -926,10 +1019,10 @@ sub _init_root
         -exclusive  => 1,
         -destroy    => 0,
     );
-    confess("Apache::SharedMem object initialization: Unable to initialize root ipc shared memory segment: $!")
+    confess("Apache::SharedMem object initialization: Unable to initialize root ipc shared memory segment ($options->{rootkey}): $!")
       unless(defined $root);
 
-    $Apache::SharedMem::ROOTKEYS{$self->{root} = $root} = 1;
+    $self->{root} = $root;
     $self->_root_lock(LOCK_EX);
     $self->_store_root($record);
     $self->_root_unlock;
@@ -1030,7 +1123,8 @@ sub _init_namespace
 sub _get_rootkey
 {
     my $self = shift;
-    my $ipckey;
+    my($ipckey, $docroot, $uid);
+
     if(exists $ENV{'GATEWAY_INTERFACE'} && $ENV{'GATEWAY_INTERFACE'} =~ /^CGI-Perl/)
     {
         # we are under mod_perl
@@ -1041,13 +1135,14 @@ sub _get_rootkey
         else
         {
             require Apache;
-            my($docroot, $uid);
             if(defined $Apache::Server::Starting && $Apache::Server::Starting)
             {
                 # we are in the startup.pl
                 my $s    = Apache->server;
-                $docroot = $s->dir_config->get('PROJECT_DOCUMENT_ROOT') || return undef;
-                $uid     = $s->uid;
+                $docroot = $s->dir_config->get('PROJECT_DOCUMENT_ROOT')
+                    ? ($s->dir_config->get('PROJECT_DOCUMENT_ROOT'))[-1] : return undef;
+                $uid     = $s->dir_config->get('PROJECT_ID')
+                    ? ($s->dir_config->get('PROJECT_ID'))[-1] : $s->uid;
             }
             else
             {
@@ -1055,24 +1150,31 @@ sub _get_rootkey
                 my $s    = $r->server;
                 $docroot = $r->document_root;
                 $uid     = $s->uid;
-                $self->_debug('document_root=', $docroot, ' uid=', $uid);
             }
-            $ipckey = IPC::SysV::ftok($docroot, $uid);
         }
     }
     elsif(exists $ENV{'DOCUMENT_ROOT'})
     {
         # we are under mod_cgi
-        $self->_debug('document_root=', $ENV{DOCUMENT_ROOT}, ' uid=', $<);
-        $ipckey = IPC::SysV::ftok($ENV{DOCUMENT_ROOT}, $<);
+        $docroot = $ENV{DOCUMENT_ROOT};
+        $uid     = $<;
     }
     else
     {
         # we are in an undefined environment
-        $self->_debug('document_root=', $ENV{PWD}, ' uid=', $<);
-        $ipckey = IPC::SysV::ftok($ENV{PWD}, $<);
+        $docroot = $ENV{PWD};
+        $uid     = $<;
     }
-    $self->_debug("rootkey=$ipckey") if(defined $self);
+
+    unless(defined $ipckey)
+    {
+        confess "PROJECT_DOCUMENT_ROOT doesn't exists or can't be accessed: $docroot"
+            if(not defined $ENV{PWD} || $ENV{PWD} eq '' || not -e $ENV{PWD} || not -r $ENV{PWD});
+        confess "PROJECT_ID is not numeric: $uid" if($uid =~ /[^\d\-]/);
+        $ipckey = IPC::SysV::ftok($docroot, $uid);
+    }
+
+    $self->_debug("document_root=$docroot, uid=$uid, rootkey=$ipckey") if(defined $self);
     return($ipckey);
 }
 
@@ -1201,6 +1303,46 @@ DESTROY
 
 =pod
 
+=head1 EXPORTS
+
+=head2 Default exports
+
+None.
+
+=head2 Available exports
+
+Following constant is available for exports : LOCK_EX LOCK_SH LOCK_UN LOCK_NB
+WAIT NOWAIT SUCCESS FAILURE
+
+=head2 Export tags defined
+
+The tag ":all" will get all of the above exports.
+Following tags are also available :
+
+=over 4
+
+=item
+
+:status
+
+Contents: SUCCESS FAILURE
+
+This tag is really recommended to the importation all the time.
+
+=item
+
+:lock
+
+Contents: LOCK_EX LOCK_SH LOCK_UN LOCK_NB
+
+=item
+
+:wait
+
+WAIT NOWAIT
+
+=back
+
 =head1 AUTHOR
 
 Olivier Poitrey E<lt>rs@rhapsodyk.netE<gt>
@@ -1225,7 +1367,7 @@ Foundation, Inc. :
 
 =head1 COPYRIGHT
 
-Copyright (C) 2001 - Fininfo http://www.fininfo.fr
+Copyright (C) 2001 - Olivier Poitrey
 
 =head1 PREREQUISITES
 
@@ -1233,11 +1375,47 @@ Apache::SharedMem needs IPC::ShareLite, Storable both available from the CPAN.
 
 =head1 SEE ALSO
 
-L<IPC::ShareLite>, shmget, ftok
+L<IPC::ShareLite>, L<shmget>, L<ftok>
 
 =head1 HISTORY
 
 $Log: SharedMem.pm,v $
+Revision 1.60  2001/10/02 09:40:32  rs
+Bugfix in _get_rootkey private method: trap empty docroot or no read access
+to docroot error.
+
+Revision 1.59  2001/09/24 08:19:40  rs
+status now return bitmask values
+
+Revision 1.58  2001/09/21 14:45:30  rs
+little doc fixes
+
+Revision 1.57  2001/09/21 12:43:41  rs
+Change copyright
+
+Revision 1.56  2001/09/20 12:45:03  rs
+Documentation update: adding an EXPORTS section
+
+Revision 1.55  2001/09/19 14:19:41  rs
+made a trace more verbose
+
+Revision 1.54  2001/09/18 08:46:32  rs
+Documentation upgrade
+
+Revision 1.53  2001/09/17 14:56:41  rs
+Suppression of ROOTKEYS global hash, obsolete.
+Documentation update: USAGE => PROJECT_ID
+
+Revision 1.52  2001/08/29 15:54:01  rs
+little bug fix in _get_rootkey
+
+Revision 1.51  2001/08/29 14:28:08  rs
+add warning on no existing document_root in _get_rootkey
+
+Revision 1.50  2001/08/29 12:59:02  rs
+some documentation update.
+get method now return undef() if value is undefined.
+
 Revision 1.49  2001/08/29 08:30:32  rs
 syntax bugfix
 

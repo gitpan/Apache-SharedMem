@@ -1,4 +1,4 @@
-Apache::SharedMem version 0.07
+Apache::SharedMem version 0.08
 ===============================
 
 This module make it easer to share data between Apache children
@@ -27,6 +27,11 @@ This module requires these other modules and libraries:
   Data::Dumper
 
 CHANGES
+
+0.08 Tue Oct  2, 2001 16:19:08
+    - status() now return bitmask values.
+    - get() method can know return undef() when value in undefined instead of void string.
+    - Bugfix in test scripts: don't failed if PWD environment variable isn't set.
 
 0.07 Mon August 27, 2001 18:36:52
     - Implement a more efficient IPC key generation for the root segment, using
@@ -79,32 +84,36 @@ CHANGES
       Very experimental code, don't use it for production purpose !
     - Implementation of automated unique namespace based on package caller
     - Implementation of smartlock mechanisme (see documentation)
+
 NAME
     Apache::SharedMem - Share data between Apache children processes through
     the shared memory
 
 SYNOPSIS
-        use Apache::SharedMem qw(:lock :wait :status);
+        use Apache::SharedMem qw(:lock :status);
 
         my $share = new Apache::SharedMem || die($Apache::SharedMem::ERROR);
 
-        $share->set(key=>'some data');
+        $share->set(key => 'some data');
 
-        # ...in another process
-        my $var = $share->get(key, NOWAIT);
-        die("can't get key: ", $self->error) unless($share->status eq SUCCESS);
+        # ...maybe in another apache child
+        my $var = $share->get(key);
 
         $share->delete(key);
 
+        # delete all keys if the total size is larger than $max_size
         $share->clear if($share->size > $max_size);
 
+        # using an exclusive blocking lock, but with a timeout
         my $lock_timeout = 40; # seconds
         if($share->lock(LOCK_EX, $lock_timeout))
         {
-            my $data...
+            my $data =...
             ...some traitement...
-            $share->set(key=>$data);
-            warn(...) if($share->status eq FAILURE);
+        
+            $share->set(key => $data); # the implicite lock is not overrided
+            warn('failed to store data in shared memory') if($share->status & FAILURE);
+
             $share->unlock;
         }
     
@@ -140,50 +149,56 @@ USAGE
     This allow Apache::SharedMem to determine a unique rootkey for all
     virtual hosts, and to cleanup this rootkey on Apache stop.
     PROJECT_DOCUMENT_ROOT is used instead of a per virtal host's
-    DOCUMENT_ROOT for generating the rootkey.
+    DOCUMENT_ROOT for rootkey's generation.
+
+    You can also provide a PROJECT_ID, it's the server's uid by default.
+    This value have to be numeric:
+
+        PerlAddVar PROJECT_ID 10
 
 METHODS
   new  (namespace => 'Namespace', ipc_mode => 0666, ipc_segment_size => 1_000, debug => 1)
 
-    "rootkey" (optional) integer:
+    *   "rootkey" optional, integer
 
-    Changes the root segment key. It must be an unsigned integer. Don't use
-    this option unless you really know what you are doing.
+        Changes the root segment key. It must be an unsigned integer. Don't
+        use this option unless you really know what you are doing.
 
-    This key allows Apache::SharedMem to find the root map of all namespaces
-    (see below) owned by your application.
+        This key allows Apache::SharedMem to find the root map of all
+        namespaces (see below) owned by your application.
 
-    The rootkey is automatically generated using the "ftok" provided by
-    IPC::SysV. Process' UID and DOCUMENT_ROOT (or current working directory)
-    are given to "ftok" so as to guarantee an unique key as far as possible.
+        The rootkey is automatically generated using the "ftok" provided by
+        IPC::SysV. Process' UID and DOCUMENT_ROOT (or current working
+        directory) are given to "ftok" so as to guarantee an unique key as
+        far as possible.
 
-    Note, if you are using mod_perl, and you'v load mod_perl via startup.pl
-    (see USAGE section for more details), the rootkey is generated once at
-    the apache start, based on the supplied PROJECT_DOCUMENT_ROOT and
-    Apache's uid.
+        Note, if you are using mod_perl, and you'v load mod_perl via
+        startup.pl (see USAGE section for more details), the rootkey is
+        generated once at the apache start, based on the supplied
+        PROJECT_DOCUMENT_ROOT and Apache's uid.
 
-    "namespace" (optional) string:
+    *   "namespace" optional, string
 
-    Setup manually the namespace. To share same datas, your program must use
-    the same namespace. This namespace is set by default to the caller's
-    package name. In most cases the default value is a good choice. But you
-    may setup manually this value if, for example, you want to share the
-    same datas between two or more modules.
+        Setup manually the namespace. To share same datas, your program must
+        use the same namespace. This namespace is set by default to the
+        caller's package name. In most cases the default value is a good
+        choice. But you may setup manually this value if, for example, you
+        want to share the same datas between two or more modules.
 
-    "ipc_mode" (optional) octal:
+    *   "ipc_mode" optional, octal
 
-    Setup manually the segment mode (see the IPC::ShareLite manpage) for
-    more details (default: 0600). Warning: this value _must_ be octal, see
-    chmod documentation in perlfunc manpage for more details.
+        Setup manually the segment mode (see the IPC::ShareLite manpage) for
+        more details (default: 0600). Warning: this value _must_ be octal,
+        see chmod documentation in perlfunc manpage for more details.
 
-    "ipc_segment_size" (optional) integer:
+    *   "ipc_segment_size" optional, integer
 
-    Setup manually the segment size (see the IPC::ShareLite manpage) for
-    more details (default: 65_536).
+        Setup manually the segment size (see the IPC::ShareLite manpage) for
+        more details (default: 65_536).
 
-    "debug" (optional) boolean:
+    *   "debug" optional, boolean
 
-    Turn on/off the debug mode (default: 0)
+        Turn on/off the debug mode (default: 0)
 
     In most case, you don't need to give any arguments to the constructor.
 
@@ -194,58 +209,72 @@ METHODS
     Note that "ipc_segment_size" is default value of IPC::ShareLite, see the
     IPC::ShareLite manpage
 
+    On succes return an Apache::SharedMem object, on error, return undef().
+    You can get error string via $Apache::SharedMem::ERROR.
+
   get  (key, [wait, [timeout]])
 
-    my $var = $object->get('mykey', WAIT, 50); if($object->status eq
-    FAILURE) { die("can't get key 'mykey´: " . $object->error); }
+    my $var = $object->get('mykey', WAIT, 50); if($object->status & FAILURE)
+    { die("can't get key 'mykey´: " . $object->error); }
 
-    key (required) string:
+    *   "key" required, string
 
-    This is the name of elemenet that you want get from the shared
-    namespace. It can be any string that perl support for hash's key.
+        This is the name of elemenet that you want get from the shared
+        namespace. It can be any string that perl support for hash's key.
 
-    wait (optional):
+    *   "wait" optional
 
-    Defined the locking status of the request. If you must get the value,
-    and can't continue without it, set this argument to constant WAIT,
-    unless you can set it to NOWAIT.
+        Defined the locking status of the request. If you must get the
+        value, and can't continue without it, set this argument to constant
+        WAIT, unless you can set it to NOWAIT.
 
-    If the key is locked when you are tring to get the value, NOWAIT return
-    status FAILURE, and WAIT hangup until the value is unlocked. An
-    alternative is to setup a WAIT timeout, see below.
+        If the key is locked when you are tring to get the value, NOWAIT
+        return status FAILURE, and WAIT hangup until the value is unlocked.
+        An alternative is to setup a WAIT timeout, see below.
 
-    NOTE: you needs :wait tag import:
+        NOTE: you needs :wait tag import:
 
-        use Apache::SharedMem qw(:wait)
+            use Apache::SharedMem qw(:wait)
 
-    timeout (optional) integer:
+        timeout (optional) integer:
 
-    if WAIT is on, timeout setup the number of seconds to wait for a
-    blocking lock, usefull for preventing dead locks.
+        if WAIT is on, timeout setup the number of seconds to wait for a
+        blocking lock, usefull for preventing dead locks.
 
-    Following status can be set:
+    Following status can be set (needs :status tag import):
 
     SUCCESS FAILURE
+
+    On error, method return undef(), but undef() is also a valid answer, so
+    don't test the method status by this way, use ($obj->status & SUCCESS)
+    instead.
 
   set  (key, value, [wait, [timeout]])
 
     my $rv = $object->set('mykey' => 'somevalue'); if($object->status eq
     FAILURE) { die("can't set key 'mykey´: " . $object->error); }
 
-    key (required): key to set
+    Try to set element "key" to "value" from the shared segment.
 
-    value (required): store a value in key
+    *   "key" required
 
-    wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking
-    shared lock (need :wait tag import).
+        name of place where to store the value
 
-    timeout (optional): if WAIT is on, timeout setup the number of seconds
-    to wait for a blocking lock (usefull for preventing dead locks)
+    *   "value" required
 
-    Try to set element "key" to "value" from the shared segment. In case of
-    failure, this methode return "undef()".
+        data to store
 
-    status: SUCCESS FAILURE
+    *   "wait" optional
+
+        WAIT or NOWAIT (default WAIT) make or not a blocking shared lock
+        (need :wait tag import).
+
+    *   "timeout" optional
+
+        if WAIT is on, timeout setup the number of seconds to wait for a
+        blocking lock (usefull for preventing dead locks)
+
+    return status: SUCCESS FAILURE
 
   delete  (key, [wait, [timeout]])
 
@@ -277,12 +306,18 @@ METHODS
 
   lock ([lock_type, [timeout]])
 
-    lock_type (optional): type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
-
-    timeout (optional): time to wait for an exclusive lock before aborting
-
     get a lock on the share segment. It returns "undef()" if failed, 1 if
     successed.
+
+    *   "lock_type" optional
+
+        type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
+
+    *   "timeout" optional
+
+        time to wait for an exclusive lock before aborting
+
+    return status: FAILURE SUCCESS
 
   unlock
 
@@ -291,6 +326,54 @@ METHODS
   error
 
     return the last error message that happened.
+
+  status
+
+    Return the last called method status. This status should be used with
+    bitmask operators &, ^, ~ and | like this :
+
+        # is last method failed ?
+        if($object->status & FAILURE) {something to do on failure}
+
+        # is last method don't succed ?
+        if($object->status ^ SUCCESS) {something to do on failure}
+
+    It's not recommended to use equality operator (== and !=) or (eq and
+    ne), they may don't work in future versions.
+
+    To import status' constants, you have to use the :status import tag,
+    like below :
+
+        use Apache::SharedMem qw(:status);
+
+EXPORTS
+  Default exports
+
+    None.
+
+  Available exports
+
+    Following constant is available for exports : LOCK_EX LOCK_SH LOCK_UN
+    LOCK_NB WAIT NOWAIT SUCCESS FAILURE
+
+  Export tags defined
+
+    The tag ":all" will get all of the above exports. Following tags are
+    also available :
+
+        :status
+
+        Contents: SUCCESS FAILURE
+
+        This tag is really recommended to the importation all the time.
+
+        :lock
+
+        Contents: LOCK_EX LOCK_SH LOCK_UN LOCK_NB
+
+        :wait
+
+        WAIT NOWAIT
 
 AUTHOR
     Olivier Poitrey <rs@rhapsodyk.net>
@@ -312,11 +395,11 @@ LICENCE
     59 Temple Place, Suite 330, Boston, MA 02111-1307
 
 COPYRIGHT
-    Copyright (C) 2001 - Fininfo http://www.fininfo.fr
+    Copyright (C) 2001 - Olivier Poitrey
 
 PREREQUISITES
     Apache::SharedMem needs IPC::ShareLite, Storable both available from the
     CPAN.
 
 SEE ALSO
-    the IPC::ShareLite manpage, shmget, ftok
+    the IPC::ShareLite manpage, the shmget manpage, the ftok manpage
