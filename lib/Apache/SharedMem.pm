@@ -1,5 +1,5 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.18 2001/06/26 14:20:02 rs Exp $
+#$Id: SharedMem.pm,v 1.20 2001/06/26 21:09:46 rs Exp $
 
 =pod
 
@@ -77,7 +77,7 @@ BEGIN
     use constant SUCCESS    => 1;
     use constant FAILURE    => 0;
 
-    $Apache::SharedMem::VERSION = '0.02';
+    $Apache::SharedMem::VERSION = '0.03';
 }
 
 =pod
@@ -132,7 +132,7 @@ sub new
           unless(defined($options->{$name}) && $options->{$name} ne '');
     }
 
-    $self->_debug("create Apache::SharedMem instence. options: ", join(', ', map("$_ => $options->{$_}", keys %$options)))
+    $self->_debug("create Apache::SharedMem instence. options: ", join(', ', map("$_ => " . (defined($options->{$_}) ? $options->{$_} : 'UNDEF'), keys %$options)))
       if($options->{debug});
 
     require('Data/Dumper.pm') if($options->{debug});
@@ -313,6 +313,8 @@ sub exists
     my $wait = defined($_[0]) ? shift : (shift, 1);
     croak('Too many arguments for exists method') if(@_);
     $self->_unset_error;
+
+    $self->_debug("key: $key");
 
     my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_SH : LOCK_SH|LOCK_NB);
     unless($lock_success)
@@ -517,6 +519,8 @@ sub _lock
     my($self, $type, $ipc_obj) = @_;
     $self->_unset_error;
 
+    return($self->unlock) if($type eq LOCK_UN); # strang bug, LOCK_UN, seem not to be same as unlock for IPC::ShareLite... 
+
     # get a lock
     $ipc_obj->lock($type) or
     do 
@@ -591,7 +595,7 @@ sub _smart_lock
     # 
     my($self, $type) = @_;
     
-    if($self->{_lock_status} eq LOCK_UN)
+    if(!defined($self->{_lock_status}) || $self->{_lock_status} eq LOCK_UN)
     {
         # no lock have been set, act like a normal lock
         $self->_debug("locking type $type, return LOCK_UN");
@@ -784,7 +788,7 @@ sub _debug
 {
     return() unless($_[0]->{options}->{debug});
     my $self  = shift;
-    my $dblvl = $_[0] =~ /^\d$/ ? shift : 1;
+    my $dblvl = defined($_[0]) && $_[0] =~ /^\d$/ ? shift : 1;
     printf(STDERR "### DEBUG %s method(%s) pid[%s]: %s\n", (caller())[0], (split(/::/, (caller(1))[3]))[-1], $$, join('', @_)) if($self->{options}->{debug} >= $dblvl);
 }
 
