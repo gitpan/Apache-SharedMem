@@ -1,4 +1,4 @@
-Apache::SharedMem version 0.04
+Apache::SharedMem version 0.05
 ===============================
 
 This module make it easer to share data between Apache children

@@ -1,5 +1,5 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.23 2001/06/27 09:11:29 rs Exp $
+#$Id: SharedMem.pm,v 1.28 2001/07/03 14:53:02 rs Exp $
 
 =pod
 
@@ -9,7 +9,7 @@ Apache::SharedMem - Share data between Apache children prcesses through the shar
 
 =head1 SYNOPSIS
 
-    use Apache::SharedMem qw(:lock :wait);
+    use Apache::SharedMem qw(:lock :wait :status);
 
     my $share = new Apache::SharedMem;
 
@@ -17,23 +17,25 @@ Apache::SharedMem - Share data between Apache children prcesses through the shar
 
     # ...in another process
     my $var = $share->get(key, NOWAIT);
-    die("can't get key: ", $self->error) unless(defined $var);
+    die("can't get key: ", $self->error) unless($share->status eq SUCCESS);
 
     $share->delete(key);
 
     $share->clear if($share->size > $max_size);
 
-    if($share->lock(LOCK_EX|LOCK_NB))
+    my $lock_timeout = 40; # seconds
+    if($share->lock(LOCK_EX, $lock_timeout))
     {
         my $data...
         ...some traitement...
         $share->set(key=>$data);
+        warn(...) if($share->status eq FAILURE);
         $share->unlock;
     }
     
     $share->release;
 
-=head1 DESCRIPTON
+=head1 DESCRIPTION
 
 This module make it easier to share data between Apache children processes trough the shared memory.
 This module internal working is a lot inspired by IPC::SharedCache, but without any cache managment.
@@ -77,7 +79,7 @@ BEGIN
     use constant SUCCESS    => 1;
     use constant FAILURE    => 0;
 
-    $Apache::SharedMem::VERSION = '0.04';
+    $Apache::SharedMem::VERSION = '0.05';
 }
 
 =pod
@@ -144,9 +146,9 @@ sub new
 
 =pod
 
-=head2 get  (key, wait)
+=head2 get  (key, [wait, [timeout]])
 
-my $var = $object->get('mykey');
+my $var = $object->get('mykey', WAIT, 50);
 if($object->status eq FAILURE)
 {
     die("can't get key 'mykey´: " . $object->error);
@@ -155,6 +157,8 @@ if($object->status eq FAILURE)
 key (required): key to get from shared memory
 
 wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking shared lock (need :wait tag import).
+
+timeout (optional): if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
 
 Try to get element C<key> from the shared segment. On failure, this methode return C<undef()> and set status to FAILURE.
 
@@ -167,12 +171,13 @@ sub get
     my $self    = shift || croak('invalide method call');
     my $key     = defined($_[0]) && $_[0] ne '' ? shift : croak(defined($_[0]) ? 'Not enough arguments for get method' : 'Invalid argument "" for get method');
     my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for get method') if(@_);
     $self->_unset_error;
     
     $self->_debug("$key ", $wait ? '(wait)' : '(no wait)');
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_SH : LOCK_SH|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_SH : LOCK_SH|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get shared lock for "get" method');
@@ -183,7 +188,7 @@ sub get
     # extract datas from the shared memory
     my $share = $self->_get_namespace;
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
 
     if(exists $share->{$key})
     {
@@ -200,7 +205,7 @@ sub get
 
 =pod
 
-=head2 set  (key, value, wait)
+=head2 set  (key, value, [wait, [timeout]])
 
 my $rv = $object->set('mykey' => 'somevalue');
 if($object->status eq FAILURE)
@@ -214,6 +219,8 @@ value (required): value a store in key
 
 wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking shared lock (need :wait tag import).
 
+timeout (optional): if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
+
 Try to set element C<key> to C<value> from the shared segment. On failure, this methode return C<undef()>.
 
 status: SUCCESS FAILURE
@@ -226,12 +233,13 @@ sub set
     my $key     = defined($_[0]) && $_[0] ne '' ? shift : croak(defined($_[0]) ? 'Not enough arguments for set method' : 'Invalid argument "" for set method');
     my $value   = defined($_[0]) ? shift : croak('Not enough arguments for set method');
     my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for set method') if(@_);
     $self->_unset_error;
     
     $self->_debug("$key $value ", $wait ? '(wait)' : '(no wait)');
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_EX : LOCK_EX|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_EX : LOCK_EX|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get exclusive lock for "set" method');
@@ -243,7 +251,7 @@ sub set
     $share->{$key} = $value;
     $self->_store_namespace($share);
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
 
     $self->_set_status(SUCCESS);
     # return value, like a common assigment
@@ -252,21 +260,22 @@ sub set
 
 =pod
 
-=head2 delete  (key, wait)
+=head2 delete  (key, [wait, [timeout]])
 
 =cut
 
 sub delete
 {
-    my $self = shift;
-    my $key  = defined($_[0]) ? shift : croak('Not enough arguments for delete method');
-    my $wait = defined($_[0]) ? shift : (shift, 1);
+    my $self    = shift;
+    my $key     = defined($_[0]) ? shift : croak('Not enough arguments for delete method');
+    my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for delete method') if(@_);
     $self->_unset_error;
 
     $self->_debug("$key ", $wait ? '(wait)' : '(no wait)');
 
-    my $exists = $self->exists($key, $wait);
+    my $exists = $self->exists($key, $wait, $timeout);
     if(!defined $exists)
     {
         $self->_set_error("can\'t delete key '$key': ", $self->error);
@@ -280,7 +289,7 @@ sub delete
         return(undef());
     }
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_EX : LOCK_EX|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_EX : LOCK_EX|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get exclusive lock for "delete" method');
@@ -293,7 +302,7 @@ sub delete
     my $rv    = delete($share->{$key});
     $self->_store_namespace($share);
    
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
 
     $self->_set_status(SUCCESS);
     # like a real delete
@@ -302,21 +311,22 @@ sub delete
 
 =pod
 
-=head2 exists  (key, wait)
+=head2 exists  (key, [wait, [timeout]])
 
 =cut
 
 sub exists
 {
-    my $self = shift;
-    my $key  = defined($_[0]) ? shift : croak('Not enough arguments for exists method');
-    my $wait = defined($_[0]) ? shift : (shift, 1);
+    my $self    = shift;
+    my $key     = defined($_[0]) ? shift : croak('Not enough arguments for exists method');
+    my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for exists method') if(@_);
     $self->_unset_error;
 
     $self->_debug("key: $key");
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_SH : LOCK_SH|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_SH : LOCK_SH|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get shared lock for "exists" method');
@@ -326,7 +336,7 @@ sub exists
 
     my $share = $self->_get_namespace;
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
 
     $self->_set_status(SUCCESS);
     return(exists $share->{$key});
@@ -334,18 +344,19 @@ sub exists
 
 =pod
 
-=head2 firstkey  (wait)
+=head2 firstkey  ([wait, [timeout]])
 
 =cut
 
 sub firstkey
 {
-    my $self = shift;
-    my $wait = defined($_[0]) ? shift : (shift, 1);
+    my $self    = shift;
+    my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for firstkey method') if(@_);
     $self->_unset_error;
 
-    my($lock_success, $out_lock) = $wait ? $self->_smart_lock(LOCK_SH) : $self->_smart_lock(LOCK_SH|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_SH : LOCK_SH|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get shared lock for "firstkey" method');
@@ -355,7 +366,7 @@ sub firstkey
 
     my $share = $self->_get_namespace;
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
     
     my $firstkey = (keys(%$share))[0];
     $self->_set_status(SUCCESS);
@@ -364,7 +375,7 @@ sub firstkey
 
 =pod
 
-=head2 nextkey  (lastkey, wait)
+=head2 nextkey  (lastkey, [wait, [timeout]])
 
 =cut
 
@@ -373,10 +384,11 @@ sub nextkey
     my $self    = shift;
     my $lastkey = defined($_[0]) ? shift : croak('Not enough arguments for nextkey method');
     my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for nextkey method') if(@_);
     $self->_unset_error;
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_SH : LOCK_SH|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_SH : LOCK_SH|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get shared lock for "nextkey" method');
@@ -386,7 +398,7 @@ sub nextkey
 
     my $share = $self->_get_namespace;
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
     
     $self->_set_status(SUCCESS);
     my @keys = keys %share;
@@ -399,7 +411,7 @@ sub nextkey
 
 =pod
 
-=head2 clear
+=head2 clear ([wait, [timeout]])
 
 return 0 on error
 
@@ -409,10 +421,11 @@ sub clear
 {
     my $self    = shift;
     my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for clear method') if(@_);
     $self->_unset_error;
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_EX : LOCK_EX|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_EX : LOCK_EX|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get shared lock for "clear" method');
@@ -422,11 +435,17 @@ sub clear
 
     $self->_store_namespace({});
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
     
     $self->_set_status(SUCCESS);
     return(undef());
 }
+
+=pod
+
+=head2 release
+
+=cut
 
 sub release
 {
@@ -462,18 +481,19 @@ sub release
 
 =pod
 
-=head2 size (wait)
+=head2 size ([wait, [timeout]])
 
 =cut
 
 sub size
 {
-    my $self = shift;
-    my $wait = defined($_[0]) ? shift : (shift, 1);
+    my $self    = shift;
+    my $wait    = defined($_[0]) ? shift : (shift, 1);
+    my $timeout = shift;
     croak('Too many arguments for size method') if(@_);
     $self->_unset_error;
 
-    my($lock_success, $out_lock) = $self->_smart_lock($wait ? LOCK_SH : LOCK_SH|LOCK_NB);
+    my($lock_success, $out_lock) = $self->_smart_lock(($wait ? LOCK_SH : LOCK_SH|LOCK_NB), $timeout);
     unless($lock_success)
     {
         $self->_set_error('can\'t get shared lock for "size" method');
@@ -486,7 +506,7 @@ sub size
     confess("Apache::SharedMem: Problem fetching segment. IPC::ShareLite error: $@") if $@;
     confess("Apache::SharedMem: Problem fetching segment. IPC::ShareLite error: $!") unless(defined $serialized);
 
-    $self->lock($out_lock);
+    $self->lock($out_lock, $timeout);
 
     $self->_set_status(SUCCESS);
     return(length $serialized);
@@ -494,38 +514,48 @@ sub size
 
 =pod
 
-=head2 lock ($lock_type)
+=head2 lock ([lock_type, [timeout]])
 
 lock_type (optional): type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
 
-get a lock on the root share segment. return 0 of undef on failure, 1 on success.
+timeout (optional): time to wait for an exclusive lock before aborting
+
+get a lock on the root share segment. return undef on failure, 1 on success.
 
 =cut
 
 sub lock
 {
-    my($self, $type) = @_;
-    $self->_debug("type $type"); 
-    my $rv = $self->_lock($type, $self->{namespace});
-    $self->{_lock_status} = $type if($rv);
+    my($self, $type, $timeout) = @_;
+    $self->_debug("type $type", defined $timeout ? ", timeout $timeout" : '');
+    my $rv = $self->_lock($type, $timeout, $self->{namespace});
+    $self->{_lock_status} = $type if($self->status eq SUCCESS);
     return($rv);
 }
 
-sub _root_lock  { $_[0]->_debug("type $_[1]"); $_[0]->_lock($_[1], $_[0]->{root}) }
+sub _root_lock  { $_[0]->_debug("type $_[1]", defined $_[2] ? ", timeout $_[2]" : ''); $_[0]->_lock($_[1], $_[2], $_[0]->{root}) }
 
 sub _lock
 {
     confess('Apache::SharedMem: Not enough arguments for lock method') if(@_ < 3);
-    my($self, $type, $ipc_obj) = @_;
+    my($self, $type, $timeout, $ipc_obj) = @_;
     $self->_unset_error;
 
+    $timeout = 0 if(!defined $timeout || $timeout =~ /\D/ || $timeout < 0);
     return($self->unlock) if($type eq LOCK_UN); # strang bug, LOCK_UN, seem not to be same as unlock for IPC::ShareLite... 
 
     # get a lock
-    $ipc_obj->lock($type) or
-    do 
+    my $rv;
+    eval
     {
-        $self->_set_error("Can\'t lock share $self->{options}->{namespace} segment");
+        local $SIG{ALRM} = sub {die "timeout"};
+        alarm $timeout;
+        $rv = $ipc_obj->lock($type);
+        alarm 0;
+    };
+    if($@ || !$rv)
+    {
+        $self->_set_error("Can\'t lock get lock: $!$@");
         $self->_set_status(FAILURE);
         return(undef());
     };
@@ -593,21 +623,20 @@ sub _smart_lock
     # in this example, the first "get" call, change the lock for a share lock, and free
     # the lock at the return.
     # 
-    my($self, $type) = @_;
+    my($self, $type, $timeout) = @_;
     
-    if(!defined($self->{_lock_status}) || $self->{_lock_status} eq LOCK_UN)
+    if(!defined($self->{_lock_status}) || $self->{_lock_status} & LOCK_UN)
     {
         # no lock have been set, act like a normal lock
         $self->_debug("locking type $type, return LOCK_UN");
-        return($self->lock($type), LOCK_UN);
+        return($self->lock($type, $timeout), LOCK_UN);
     }
-    elsif(($self->{_lock_status} eq LOCK_SH || $self->{_lock_status} eq (LOCK_SH|LOCK_NB))
-      && ($type eq LOCK_EX || $type eq (LOCK_EX|LOCK_NB)))
+    elsif(($self->{_lock_status} & LOCK_SH) && ($type & LOCK_EX))
     {
-        # the current lock is less powerfull than targeted lock type
+        # the current lock is powerless than targeted lock type
         my $old_lock = $self->{_lock_status};
         $self->_debug("locking type $type, return $old_lock");
-        return($self->lock($type), $old_lock);
+        return($self->lock($type, $timeout), $old_lock);
     }
 
     $self->_debug("live lock untouch, return $self->{_lock_status}");
@@ -842,3 +871,10 @@ Foundation, Inc. :
 =head1 COPYRIGHT
 
 Copyright (C) 2001 - Fininfo http://www.fininfo.fr
+
+=head1 HISTORY
+
+$Log: SharedMem.pm,v $
+Revision 1.28  2001/07/03 14:53:02  rs
+make a real changes log
+
