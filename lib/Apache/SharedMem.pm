@@ -1,5 +1,5 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.60 2001/10/02 09:40:32 rs Exp $
+#$Id: SharedMem.pm,v 1.61 2001/10/04 12:15:22 rs Exp $
 
 =pod
 
@@ -106,7 +106,7 @@ BEGIN
     use constant IPC_MODE   => 0600; 
     use constant IPC_SEGSIZE=> 65_536;
 
-    $Apache::SharedMem::VERSION  = '0.08';
+    $Apache::SharedMem::VERSION  = '0.09';
 }
 
 # main
@@ -1168,9 +1168,10 @@ sub _get_rootkey
 
     unless(defined $ipckey)
     {
-        confess "PROJECT_DOCUMENT_ROOT doesn't exists or can't be accessed: $docroot"
-            if(not defined $ENV{PWD} || $ENV{PWD} eq '' || not -e $ENV{PWD} || not -r $ENV{PWD});
-        confess "PROJECT_ID is not numeric: $uid" if($uid =~ /[^\d\-]/);
+        confess("PROJECT_DOCUMENT_ROOT doesn't exists or can't be accessed: " . (defined $docroot ? $docroot : '[undefined]'))
+          if(not defined $docroot || $docroot eq '' || not -e $docroot || not -r $docroot);
+        confess("PROJECT_ID is not numeric: " . (defined $uid ? $uid : '[undefined]')) 
+          if(not defined $uid || $uid =~ /[^\d\-]/);
         $ipckey = IPC::SysV::ftok($docroot, $uid);
     }
 
@@ -1380,6 +1381,10 @@ L<IPC::ShareLite>, L<shmget>, L<ftok>
 =head1 HISTORY
 
 $Log: SharedMem.pm,v $
+Revision 1.61  2001/10/04 12:15:22  rs
+Very major bugfix that made module unable to work correctly under mod_perl !
+New version 0.09 to CPAN immediatly
+
 Revision 1.60  2001/10/02 09:40:32  rs
 Bugfix in _get_rootkey private method: trap empty docroot or no read access
 to docroot error.

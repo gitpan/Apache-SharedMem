@@ -1,4 +1,4 @@
-Apache::SharedMem version 0.08
+Apache::SharedMem version 0.09
 ===============================
 
 This module make it easer to share data between Apache children
@@ -27,6 +27,9 @@ This module requires these other modules and libraries:
   Data::Dumper
 
 CHANGES
+
+0.09 Thu Oct  4, 2001 13:54:53
+    - Major bugfix that made the module unusable under mod_perl !
 
 0.08 Tue Oct  2, 2001 16:19:08
     - status() now return bitmask values.
