@@ -1,5 +1,5 @@
 package Apache::SharedMem;
-#$Id: SharedMem.pm,v 1.34 2001/08/08 14:15:07 rs Exp $
+#$Id: SharedMem.pm,v 1.49 2001/08/29 08:30:32 rs Exp $
 
 =pod
 
@@ -11,7 +11,7 @@ Apache::SharedMem - Share data between Apache children processes through the sha
 
     use Apache::SharedMem qw(:lock :wait :status);
 
-    my $share = new Apache::SharedMem;
+    my $share = new Apache::SharedMem || die($Apache::SharedMem::ERROR);
 
     $share->set(key=>'some data');
 
@@ -37,17 +37,31 @@ Apache::SharedMem - Share data between Apache children processes through the sha
 
 =head1 DESCRIPTION
 
-This module make it easier to share data between Apache children processes through the shared memory.
-This module internal functionment is a lot inspired from IPC::SharedCache, but without any cache managment.
-The share memory segment key is automatically deduced by the caller package, that's means 2 modules
-can use same keys without being concerned about namespace clash.
+This module make it easier to share data between Apache children processes through shared memory.
+This module internal functionment is much inspired from IPC::SharedCache, but without any cache management.
+The share memory segment key is automatically deduced by the caller package, which means that 2 modules
+can use same keys without being concerned about namespace clash. An additionnal namespace is used per application,
+which means that the same module, with the same namespace used in two applications doesn't clash too. Application
+distinction is made on two things : the process' UID and DOCUMENT_ROOT (for http applications) or current
+working directory.
 
-This module handles all shared memory interaction use the IPC::SharedLite module and all data 
-serialization using Storable. See L<IPC::ShareLite> and L<Storable> for details.
+This module handles all shared memory interaction via the IPC::SharedLite and all data 
+serialization with Storable. See L<IPC::ShareLite> and L<Storable> for details.
 
 =head1 USAGE
 
-under construction
+If you are running under mod_perl, you should put this line in your httpd.conf:
+
+    # must be a valid path
+    PerlAddVar PROJECT_DOCUMENT_ROOT /path/to/your/projects/root
+
+and in your startup.pl:
+
+    use Apache::SharedMem;
+
+This allow Apache::SharedMem to determine a unique rootkey for all virtual hosts,
+and to cleanup this rootkey on Apache stop. PROJECT_DOCUMENT_ROOT is used instead of a
+per virtal host's DOCUMENT_ROOT for generating the rootkey.
 
 =cut
 
@@ -56,11 +70,12 @@ BEGIN
     use strict;
     use 5.005;
     use Carp;
+    use IPC::SysV qw();
     use IPC::ShareLite qw(:lock);
     use Storable qw(freeze thaw);
-    use Exporter ();
 
-    @Apache::SharedMem::ISA         = qw(Exporter);
+    use base qw(Exporter);
+
     %Apache::SharedMem::EXPORT_TAGS = 
     (
         'all'   => [qw(
@@ -79,7 +94,28 @@ BEGIN
     use constant SUCCESS    => 1;
     use constant FAILURE    => 0;
 
-    $Apache::SharedMem::VERSION = '0.06';
+    # default values
+    use constant IPC_MODE   => 0600; 
+    use constant IPC_SEGSIZE=> 65_536;
+
+    $Apache::SharedMem::VERSION  = '0.07';
+}
+
+# main
+{
+    if(exists $ENV{'GATEWAY_INTERFACE'} && $ENV{'GATEWAY_INTERFACE'} =~ /^CGI-Perl/ 
+        && defined $Apache::Server::Starting && $Apache::Server::Starting)
+    {
+        # we are under startup.pl
+        if($Apache::SharedMem::ROOTKEY = _get_rootkey())
+        {
+            Apache->server->register_cleanup(\&Apache::SharedMem::_cleanup);
+        }
+        else
+        {
+            print(STDERR "Apache::SharedMem: can't determine the global root key, have you put 'PerlAddVar PROJECT_DOCUMENT_ROOT /path/to/your/project/root/' in your httpd.conf ?\n");
+        }
+    }
 }
 
 =pod
@@ -88,20 +124,50 @@ BEGIN
 
 =head2 new  (namespace => 'Namespace', ipc_mode => 0666, ipc_segment_size => 1_000, debug => 1)
 
-rootname (optional): change the default root name segment identifier (default: TOOR).
+C<rootkey> (optional) integer:
 
-namespace (optional): setup manually the package name (default: caller package name).
+Changes the root segment key. It must be an unsigned integer. Don't use this 
+option unless you really know what you are doing. 
 
-ipc_mode (optional): setup manually the segment mode (see IPC::ShareLite man page) (default: 0666).
+This key allows Apache::SharedMem to find the root map of all namespaces (see below) 
+owned by your application.
 
-ipc_segment_size (optional): setup manually the segment size (see IPC::ShareLite man page) (default: 65_536).
+The rootkey is automatically generated using the C<ftok> provided by IPC::SysV. 
+Process' UID and DOCUMENT_ROOT (or current working directory) are given to C<ftok> 
+so as to guarantee an unique key as far as possible. 
 
-debug (optional): turn on/off debug mode (default: 0)
+Note, if you are using mod_perl, and you'v load mod_perl via startup.pl 
+(see USAGE section for more details), the rootkey is generated once at the apache 
+start, based on the supplied PROJECT_DOCUMENT_ROOT and Apache's uid.
 
-In most case, you don't need to give any arguments to the constructor. But for some reasons, (like, for
-example, sharing the same namespace between 2 modules) you can setup some parameters manually.
+C<namespace> (optional) string: 
 
-Note that C<ipc_segment_size> is default value of IPC::ShareLite, see L<IPC::ShareLite>
+Setup manually the namespace. To share same datas, your program must use the same 
+namespace. This namespace is set by default to the caller's package name. In most
+cases the default value is a good choice. But you may setup manually this value if,
+for example, you want to share the same datas between two or more modules. 
+
+C<ipc_mode> (optional) octal:
+
+Setup manually the segment mode (see L<IPC::ShareLite>) for more details (default: 0600).
+Warning: this value _must_ be octal, see chmod documentation in perlfunc manpage for more details.
+
+C<ipc_segment_size> (optional) integer:
+
+Setup manually the segment size (see L<IPC::ShareLite>) for more details (default: 65_536).
+
+C<debug> (optional) boolean:
+
+Turn on/off the debug mode (default: 0)
+
+In most case, you don't need to give any arguments to the constructor.
+
+C<ipc_mode> and C<ipc_segment_size> are used only on the first namespace
+initialisation. Using different values on an existing key (in shared memory)
+has no effect. 
+
+Note that C<ipc_segment_size> is default value of IPC::ShareLite, see
+L<IPC::ShareLite> 
 
 =cut
 
@@ -112,10 +178,12 @@ sub new
 
     my $options = $self->{options} =
     {
-        rootname            => 'TOOR', # TODO find another solution for a more unique rootspace
+        rootname            => undef, # obsolete, use rootkey insted
+        rootkey             => undef,
         namespace           => (caller())[0],
-        ipc_mode            => undef(), # not really managed for moment
-        ipc_segment_size    => 65_536,
+        ipc_mode            => IPC_MODE,
+        ipc_segment_size    => IPC_SEGSIZE,
+        readonly            => 0,
         debug               => 0,
     };
 
@@ -128,7 +196,17 @@ sub new
         $options->{lc($_[$x])} = $_[($x + 1)];
     }
 
-    foreach my $name (qw(namespace))
+    _init_dumper() if($options->{debug});
+
+    if($options->{rootname})
+    {
+        carp('obsolete parameter: rootname');
+        (defined $options->{rootkey} ? my $devnull : $options->{rootkey}) = delete($options->{rootname});
+    }
+
+    $options->{rootkey} = defined($options->{rootkey}) ? $options->{rootkey} : $self->_get_rootkey;
+
+    foreach my $name (qw(namespace rootkey))
     {
         croak("$pkg object creation missing $name parameter.")
           unless(defined($options->{$name}) && $options->{$name} ne '');
@@ -137,9 +215,7 @@ sub new
     $self->_debug("create Apache::SharedMem instence. options: ", join(', ', map("$_ => " . (defined($options->{$_}) ? $options->{$_} : 'UNDEF'), keys %$options)))
       if($options->{debug});
 
-    require('Data/Dumper.pm') if($options->{debug});
-
-    $self->_init_namespace;
+    $self->_init_namespace || $options->{readonly} || return undef;
 
     return $self;
 }
@@ -154,15 +230,31 @@ if($object->status eq FAILURE)
     die("can't get key 'mykey´: " . $object->error);
 }
 
-key (required): key to get from shared memory
+key (required) string: 
 
-wait (optional): WAIT or NOWAIT (default WAIT) make or not a blocking shared lock (need :wait tag import).
+This is the name of elemenet that you want get from the shared namespace. It can be any string that perl
+support for hash's key.
 
-timeout (optional): if WAIT is on, timeout setup the number of seconds to wait for a blocking lock (usefull for preventing dead locks)
+wait (optional):
 
-Try to get an element C<key> from the shared segment. In case of failure, this methode returns C<undef()> and set status to FAILURE.
+Defined the locking status of the request. If you must get the value, and can't continue without it, set
+this argument to constant WAIT, unless you can set it to NOWAIT. 
 
-status: SUCCESS FAILURE
+If the key is locked when you are tring to get the value, NOWAIT return status FAILURE, and WAIT hangup
+until the value is unlocked. An alternative is to setup a WAIT timeout, see below.
+
+NOTE: you needs :wait tag import: 
+
+    use Apache::SharedMem qw(:wait)
+
+timeout (optional) integer: 
+
+if WAIT is on, timeout setup the number of seconds to wait for a blocking lock, usefull for preventing 
+dead locks.
+
+Following status can be set:
+
+SUCCESS FAILURE
 
 =cut
 
@@ -443,19 +535,40 @@ sub clear
 
 =pod
 
-=head2 release
+=head2 release [namespace]
+
+Release share memory space taken by the given namespace or object's namespace. Root map will be release too if empty.
 
 =cut
 
 sub release
 {
-    my $self    = shift;
-    my $options = $self->{options};
+    my $self        = shift;
+    my $options     = $self->{options};
+    my $namespace   = defined $_[0] ? shift : $options->{namespace};
     $self->_unset_error;
 
+    $self->_debug($namespace);
+
+    if($options->{readonly})
+    {
+        $self->_set_error('can\'t call release namespace on readonly mode');
+        $self->_set_status(FAILURE);
+        return undef;
+    }
+
     $self->_root_lock(LOCK_EX);
-    my $root  = $self->_get_root;
-    my $keyid = delete($root->{'map'}->{$options->{namespace}});
+    my $root = $self->_get_root;
+
+    unless(exists $root->{'map'}->{$namespace})
+    {
+        $self->_set_error("Apache::SharedMem: namespace '$namespace' doesn't exists in the map");
+        $self->_set_status(FAILURE);
+        return(undef());
+    }
+
+    my $properties = delete($root->{'map'}->{$namespace});
+
     $self->_store_root($root);
     $self->_root_unlock;
 
@@ -463,10 +576,11 @@ sub release
 
     my $share = new IPC::ShareLite
     (
-        -key        => $keyid,
-        -size       => $options->{ipc_segment_size},
-        -create     => 0,
-        -destroy    => 1,
+        -key     => $properties->{key},
+        -size    => $properties->{size},
+        -mode    => $properties->{mode},
+        -create  => 0,
+        -destroy => 1,
     );
     unless(defined $share)
     {
@@ -475,8 +589,57 @@ sub release
         return(undef());
     }
 
+    unless(keys %{$root->{'map'}})
+    {
+        # map is empty, destroy it
+        $self->_debug("root map is empty, delete it");
+        undef($self->{root});
+        my $rm = new IPC::ShareLite
+        (
+            -key     => $options->{rootkey}, 
+            -size    => $options->{ipc_segsize},
+            -mode    => $options->{ipc_mode},
+            -create  => 0,
+            -destroy => 1
+        );
+        unless(defined $rm)
+        {
+            $self->_set_status(FAILURE);
+            $self->_set_error("can't delete empty root map: $!");
+        }
+        undef $rm; # call DESTROY method explicitly
+    }
+
     $self->_set_status(SUCCESS);
     return(1);
+}
+
+=pod
+
+=head2 destroy
+
+Destroy all namespace found in the root map, and root map itself.
+
+=cut
+
+sub destroy
+{
+    my $self    = shift;
+
+    $self->_root_lock(LOCK_SH);
+    my $root = $self->_get_root;
+    $self->_root_unlock;
+
+    my @ns_list = keys(%{$root->{'map'}});
+    $self->_debug('segment\'s list for deletion : ', join(', ', @ns_list));
+    my $err = 0;
+    foreach $ns (@ns_list)
+    {
+        $self->_debug("release namespace: $ns");
+        $self->release($ns);
+        $err++ unless($self->status == SUCCESS);
+    }
+    $self->_set_status($err ? FAILURE : SUCCESS);
 }
 
 =pod
@@ -514,13 +677,55 @@ sub size
 
 =pod
 
+=head2 namespaces
+
+Debug method, return the list of all namespace in the root map.
+(devel only)
+
+=cut
+
+sub namespaces
+{
+    my $self    = shift;
+    my $record  = $self->_get_root;
+    return(keys %{$record->{'map'}});
+}
+
+sub dump_map
+{
+    my $self    = shift;
+
+    _init_dumper();
+    my $root_record = $self->_get_root || return undef;
+    return Data::Dumper::Dumper($root_record);
+}
+
+sub dump
+{
+    my $self        = shift;
+    my $namespace   = defined $_[0] ? shift : croak('too few arguments');
+
+    _init_dumper();
+    if(my $ns_obj = $self->_get_namespace_ipcobj($self->_get_root, $namespace))
+    {
+        return Data::Dumper::Dumper($self->_get_record($ns_obj));
+    }
+    else
+    {
+        carp("can't read namespace $namespace: ", $self->error);
+        return undef;
+    }
+}
+
+=pod
+
 =head2 lock ([lock_type, [timeout]])
 
 lock_type (optional): type of lock (LOCK_EX, LOCK_SH, LOCK_NB, LOCK_UN)
 
 timeout (optional): time to wait for an exclusive lock before aborting
 
-get a lock on the root share segment. It returns C<undef()> if failed, 1 if successed.
+get a lock on the share segment. It returns C<undef()> if failed, 1 if successed.
 
 =cut
 
@@ -650,10 +855,11 @@ sub _init_root
     my $options = $self->{options};
     my $record;
 
+    $self->_debug;
     # try to get a handle on an existing root for this namespace
     my $root = new IPC::ShareLite
     (
-        -key        => $options->{rootname},
+        -key        => $options->{rootkey},
         -mode       => $options->{ipc_mode},
         -size       => $options->{ipc_segment_size},
         -create     => 0,
@@ -663,25 +869,57 @@ sub _init_root
     if(defined $root)
     {
         # we have found an existing root
-        $self->{root} = $root;
+        $Apache::SharedMem::ROOTKEYS{$self->{root} = $root} = 1;
         $self->_root_lock(LOCK_SH);
         $record = $self->_get_root;
         $self->_root_unlock;
+        unless(ref $record && ref($record) eq 'HASH' && exists $record->{'map'})
+        {
+            $self->_debug("map dump: ", $record, Data::Dumper::Dumper($record)) if($options->{debug});
+            confess("Apache::SharedMem object initialization: wrong root map type")
+        }
+
+        # checking map version
+        unless(exists $record->{'version'} && $record->{'version'} >= 2)
+        {
+            # old map style, we ne upgrade it
+            $self->_root_lock(LOCK_EX);
+            foreach my $namespace (keys %{$record->{'map'}})
+            {
+                $namespace = 
+                {
+                    key     => $namespace,
+                    mode    => $options->{ipc_mode},
+                    size    => $options->{ipc_segment_size},
+                }
+            }
+            $self->_store_root($record);
+            $self->_root_unlock;
+        }
+
         return($record);
     }
 
-    $self->_debug('ROOT INIT');
+    $self->_debug('root map first initalisation');
+
+    if($options->{readonly})
+    {
+        $self->_set_error("root map ($options->{rootkey}) doesn't exists, can't create one in readonly mode");
+        $self->_set_status(FAILURE);
+        return(undef);
+    }
 
     # prepare empty root record for new root creation
     $record = 
     {
         'map'       => {},
-        'last_key'  => 1,
+        'last_key'  => $options->{rootkey},
+        'version'   => 2, # map version
     };
 
     $root = new IPC::ShareLite
     (
-        -key        => $options->{rootname},
+        -key        => $options->{rootkey},
         -mode       => $options->{ipc_mode},
         -size       => $options->{ipc_segment_size},
         -create     => 1,
@@ -691,12 +929,40 @@ sub _init_root
     confess("Apache::SharedMem object initialization: Unable to initialize root ipc shared memory segment: $!")
       unless(defined $root);
 
-    $self->{root} = $root;
+    $Apache::SharedMem::ROOTKEYS{$self->{root} = $root} = 1;
     $self->_root_lock(LOCK_EX);
     $self->_store_root($record);
     $self->_root_unlock;
 
     return($record);
+}
+
+sub _get_namespace_ipcobj
+{
+    my($self, $rootrecord, $namespace) = @_;
+
+    if(my $properties = $rootrecord->{'map'}->{$namespace})
+    {
+        $self->_debug('namespace exists');
+        # namespace already exists
+        $share = new IPC::ShareLite
+        (   
+            -key            => $properties->{key},
+            -mode           => $properties->{mode},
+            -size           => $properties->{size},
+            -create         => 0,
+            -destroy        => 0,
+        );
+        confess("Apache::SharedMem: Unable to get shared cache block ($namespace=$properties->{key}): $!") unless(defined $share);
+        $self->_set_status(SUCCESS);
+        return $share;
+    }
+    else
+    {
+        $self->_set_status(FAILURE);
+        $self->_set_error("no such namespace: '$namespace'");
+        return undef();
+    }
 }
 
 sub _init_namespace
@@ -705,35 +971,35 @@ sub _init_namespace
     my $options     = $self->{options};
     my $namespace   = $options->{namespace};
 
-    my $rootrecord  = $self->_init_root;
+    $self->_debug;
+    my $rootrecord  = $self->_init_root || return undef;
 
     my $share;
     if(exists $rootrecord->{'map'}->{$namespace})
     {
-        $self->_debug('namespace exists');
-        # namespace already exists
-        $share = new IPC::ShareLite
-        (
-            -key            => $rootrecord->{'map'}->{$namespace},
-            -mode           => $options->{ipc_mode},
-            -size           => $options->{ipc_segment_size},
-            -create         => 0,
-            -destroy        => 0,
-        );
-        confess("Apache::SharedMem: Unable to get shared cache block $self->{root}->{'map'}->{$key}: $!") unless(defined $share);
+        $share = $self->_get_namespace_ipcobj($rootrecord, $namespace);
     }
     else
     {
+        if($options->{readonly})
+        {
+            $self->_set_error("namespace '$namespace' doesn't exists, can't create one in readonly mode");
+            $self->_set_status(FAILURE);
+            return(undef);
+        }
+
         $self->_debug('namespace doesn\'t exists, creating...');
         # otherwise we need to find a new segment
-        my $ipc_key = $rootrecord->{'last_key'};
+        my $ipc_key  = $rootrecord->{'last_key'}+1;
+        my $ipc_mode = $options->{ipc_mode};
+        my $ipc_size = $options->{ipc_segment_size};
         for(my $end = $ipc_key + 10_000; $ipc_key != $end; $ipc_key++)
         {
             $share = new IPC::ShareLite
             (
                 -key        => $ipc_key,
-                -mode       => $options->{ipc_mode},
-                -size       => $options->{ipc_segment_size},
+                -mode       => $ipc_mode,
+                -size       => $ipc_size,
                 -create     => 1,
                 -exclusive  => 1,
                 -destroy    => 0,
@@ -745,13 +1011,69 @@ sub _init_namespace
 
         # update the root record
         $self->_root_lock(LOCK_EX);
-        $rootrecord->{'last_key'}           = $ipc_key;
-        $rootrecord->{'map'}->{$namespace}  = $ipc_key;
+        $rootrecord->{'map'}->{$namespace} =
+        {
+            key     => $ipc_key,
+            mode    => $ipc_mode,
+            size    => $ipc_size,
+        };
+        $rootrecord->{'last_key'} = $ipc_key;
+        $self->_store_record({}, $share); # init contents, to avoid root map's corruption in certain circumstances
         $self->_store_root($rootrecord);
         $self->_root_unlock;
     }
 
     return($self->{namespace} = $share);
+}
+
+# return a most hase possible, unique IPC identifier
+sub _get_rootkey
+{
+    my $self = shift;
+    my $ipckey;
+    if(exists $ENV{'GATEWAY_INTERFACE'} && $ENV{'GATEWAY_INTERFACE'} =~ /^CGI-Perl/)
+    {
+        # we are under mod_perl
+        if(defined $Apache::SharedMem::ROOTKEY)
+        {
+            $ipckey = $Apache::SharedMem::ROOTKEY; # look at import() for more details
+        }
+        else
+        {
+            require Apache;
+            my($docroot, $uid);
+            if(defined $Apache::Server::Starting && $Apache::Server::Starting)
+            {
+                # we are in the startup.pl
+                my $s    = Apache->server;
+                $docroot = $s->dir_config->get('PROJECT_DOCUMENT_ROOT') || return undef;
+                $uid     = $s->uid;
+            }
+            else
+            {
+                my $r    = Apache->request;
+                my $s    = $r->server;
+                $docroot = $r->document_root;
+                $uid     = $s->uid;
+                $self->_debug('document_root=', $docroot, ' uid=', $uid);
+            }
+            $ipckey = IPC::SysV::ftok($docroot, $uid);
+        }
+    }
+    elsif(exists $ENV{'DOCUMENT_ROOT'})
+    {
+        # we are under mod_cgi
+        $self->_debug('document_root=', $ENV{DOCUMENT_ROOT}, ' uid=', $<);
+        $ipckey = IPC::SysV::ftok($ENV{DOCUMENT_ROOT}, $<);
+    }
+    else
+    {
+        # we are in an undefined environment
+        $self->_debug('document_root=', $ENV{PWD}, ' uid=', $<);
+        $ipckey = IPC::SysV::ftok($ENV{PWD}, $<);
+    }
+    $self->_debug("rootkey=$ipckey") if(defined $self);
+    return($ipckey);
 }
 
 sub _get_namespace { $_[0]->_debug; $_[0]->_get_record($_[0]->{namespace}) }
@@ -760,6 +1082,8 @@ sub _get_root      { $_[0]->_debug; $_[0]->_get_record($_[0]->{root}) }
 sub _get_record
 {
     my($self, $ipc_obj) = @_;
+
+    return undef unless(defined $ipc_obj);
 
     my($serialized, $record);
 
@@ -795,7 +1119,14 @@ sub _store_record
 {
     my $self    = shift;
     my $share   = defined($_[0]) ? (ref($_[0]) eq 'HASH' ? shift() : croak('Apache::SharedMem: unexpected error, wrong data type')) : croak('Apache::SharedMem; unexpected error, missing argument');
-    my $ipc_obj = shift;
+    my $ipc_obj = defined $_[0] ? shift : return undef;
+
+    if($self->{options}->{readonly})
+    {
+        $self->_set_error('can\'t store any data in readonly mode');
+        $self->_set_status(FAILURE);
+        return undef;
+    }
 
     $self->_debug(4, 'dump: ', Data::Dumper::Dumper($share)) if($self->{options}->{debug});
 
@@ -826,21 +1157,44 @@ sub _debug
 sub _set_error
 {
     my $self = shift;
-    $self->{__last_error__} = join('', @_);
-    $self->_debug($self->error);
+    $self->_debug($Apache::SharedMem::ERROR = $self->{__last_error__} = join('', @_));
 }
 
 sub _unset_error
 {
     my $self = shift;
-    $self->{__last_error__} = '';
+    $Apache::SharedMem::ERROR = $self->{__last_error__} = '';
 }
 
 sub _set_status
 {
     my $self = shift;
-    $self->{__status__} = defined $_[0] ? $_[0] : '';
+    $self->{__status__} = defined($_[0]) ? $_[0] : '';
     $self->_debug("setting status to $_[0]");
+}
+
+sub _init_dumper
+{
+    require Data::Dumper;
+    $Data::Dumper::Indent    = 2;
+    $Data::Dumper::Terse     = 1;
+    $Data::Dumper::Quotekeys = 0;
+}
+
+sub _cleanup
+{
+    if(defined $Apache::SharedMem::ROOTKEY)
+    {
+        my $share = new Apache::SharedMem;
+        $share->destroy if(defined $share)
+    }
+}
+
+DESTROY
+{
+    # auto unlock on destroy, it seem to work under mod_perl with Apache::Registry, not tested yet under mod_perl handlers
+    $_[0]->unlock 
+      if(defined $_[0]->{_lock_status} && ($_[0]->{_lock_status} & LOCK_SH || $_[0]->{_lock_status} & LOCK_EX));
 }
 
 1;
@@ -875,15 +1229,84 @@ Copyright (C) 2001 - Fininfo http://www.fininfo.fr
 
 =head1 PREREQUISITES
 
-L<Apache::SharedMem> needs L<IPC::ShareLite>, L<Storable> both available from the CPAN.
+Apache::SharedMem needs IPC::ShareLite, Storable both available from the CPAN.
 
 =head1 SEE ALSO
 
-L<IPC::ShareLite>, L<IPC::SharedMem>, shmget
+L<IPC::ShareLite>, shmget, ftok
 
 =head1 HISTORY
 
 $Log: SharedMem.pm,v $
+Revision 1.49  2001/08/29 08:30:32  rs
+syntax bugfix
+
+Revision 1.48  2001/08/29 08:27:13  rs
+doc fix
+
+Revision 1.47  2001/08/29 08:24:23  rs
+meny documentation updates
+
+Revision 1.46  2001/08/28 16:42:14  rs
+adding better support of mod_perl with a cleanup method handled to Apache's
+registry_cleanup.
+
+Revision 1.45  2001/08/28 10:17:00  rs
+little documentation fix
+
+Revision 1.44  2001/08/28 08:45:12  rs
+stop using autouse for Data::Dumper, mod_perl don't like it
+add auto unlock on DESTROY, seem to work under mod_perl with Apache::Registry
+TODO test with mod_perl handlers
+
+Revision 1.43  2001/08/27 15:42:02  rs
+bugfix in release method, on root map cleanup, ipc_mode must be defined
+bugfix in _init_namespace method, if object was create without any "set" called,
+the empty namespace won't be allocated.
+
+Revision 1.42  2001/08/24 16:11:25  rs
+    - Implement a more efficient IPC key generation for the root segment, using
+      the system ftok() function provied by IPC::SysV module
+    - Pod documentation
+    - Default IPC mode is now 0600
+    - We now keep ipc_mode and ipc_segment_size in the root map for calling IPC::ShareLite
+      with same values.
+    - Add "readonly" parameter to constructor
+    - Feature enhancement, add "dump" and "dump_map" methods
+    - Data::Dumper is now autoused
+    - Feature enhancement, release method now release root map when it go empty
+    - Feature enhancement, add a "destroy" method, that call "release" method on all root-map's
+      namespaces. Usefull for cleaning shared memory on Apache shutdown.
+    - Misc bugfixes
+
+Revision 1.41  2001/08/23 08:37:03  rs
+major bug, _get_rootkey was call mod_perl method on a wrong object
+
+Revision 1.40  2001/08/23 08:08:18  rs
+little documentation update
+
+Revision 1.39  2001/08/23 00:56:32  rs
+vocabulary correction in POD documentation
+
+Revision 1.38  2001/08/22 16:10:15  rs
+- Pod documentation
+- Default IPC mode is now 0600
+- We now keep ipc_mode and ipc_segment_size in the root map for calling IPC::ShareLite
+  with same values.
+- Bugfix, release now really clean segments (seem to be an IPC::ShareLite bug)
+
+Revision 1.37  2001/08/21 13:17:35  rs
+switch to version O.07
+
+Revision 1.36  2001/08/21 13:17:02  rs
+add method _get_rootkey. this method allow constructor to determine a more
+uniq ipc key. key is generated with IPC::SysV::ftok() function, based on
+ducument_root and user id.
+
+Revision 1.35  2001/08/17 13:28:18  rs
+make precedence more readable in "_set_status" method
+some pod corrections
+
 Revision 1.34  2001/08/08 14:15:07  rs
 forcing default lock to LOCK_EX
 

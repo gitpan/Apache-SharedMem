@@ -1,3 +1,5 @@
+package Test::AS::import;
+
 BEGIN
 {
     use strict;
@@ -17,7 +19,7 @@ foreach(qw(LOCK_EX LOCK_SH LOCK_UN LOCK_NB WAIT NOWAIT SUCCESS FAILURE))
 {
     eval('$constest1 += defined('. $_ .')');
 }
-main::ok($constest1, 8, ':all tag import');
+Test::AS::import::ok($constest1, 8, ':all tag import');
 
 package Test2;
 use Apache::SharedMem qw(:lock);
@@ -26,7 +28,7 @@ foreach(qw(LOCK_EX LOCK_SH LOCK_UN LOCK_NB))
 {
     eval('$constest2 += defined(' . $_ . ')');
 }
-main::ok($constest2, 4, ':lock tag import');
+Test::AS::import::ok($constest2, 4, ':lock tag import');
 
 package Test3;
 use Apache::SharedMem qw(:wait);
@@ -35,7 +37,7 @@ foreach(qw(WAIT NOWAIT))
 {
     eval('$constest3 += defined(' . $_ . ')');
 }
-main::ok($constest3, 2, ':wait tag import');
+Test::AS::import::ok($constest3, 2, ':wait tag import');
 
 package Test4;
 use Apache::SharedMem qw(:status);
@@ -44,4 +46,4 @@ foreach(qw(SUCCESS FAILURE))
 {
     eval('$constest4 += defined(' . $_ . ')');
 }
-main::ok($constest4, 2, ':status tag import');
+Test::AS::import::ok($constest4, 2, ':status tag import');

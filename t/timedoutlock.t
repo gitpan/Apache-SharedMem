@@ -4,7 +4,7 @@ BEGIN
 {
     use strict;
     use Test;
-    plan tests => 7;
+    plan tests => 8;
 }
 
 
@@ -69,3 +69,5 @@ ok(!$@ && $share2->status, FAILURE);
 
 
 $share1->unlock;
+$share2->release;
+ok($share2->status, SUCCESS);

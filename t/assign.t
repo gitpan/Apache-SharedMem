@@ -21,7 +21,7 @@ ok($share->get('test'), 'teststring');
 my $share2 = new Apache::SharedMem;
 ok($share2->get('test'), 'teststring');
 
-$share2->delete('test');
+$share->delete('test');
 ok($share->status, SUCCESS);
 ok(!defined($share->get('test')));
 ok(!$share2->exists('test'));

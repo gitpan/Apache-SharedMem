@@ -1,11 +1,30 @@
 Revision history for Perl module Apache::SharedMem.
 
-0.06 ??
+0.07 Mon August 27, 2001 18:36:52
+    - Implement a more efficient IPC key generation for the root segment, using
+      the system ftok() function provied by IPC::SysV module
+    - Pod documentation
+    - Default IPC mode is now 0600
+    - We now keep ipc_mode and ipc_segment_size in the root map for calling IPC::ShareLite
+      with same values.
+    - Add "readonly" parameter to constructor
+    - Feature enhancement, add "dump" and "dump_map" methods
+    - Data::Dumper is now autoused
+    - Feature enhancement, release method now release root map when it go empty
+    - Feature enhancement, add a "destroy" method, that call "release" method on all root-map's
+      namespaces. Usefull for cleaning shared memory on Apache shutdown.
+    - Adding tools to package for debuging purpose
+    - Bugfix in delete method, for problem on root map cleanup
+    - Better support of mod_perl
+    - Minor bugfix in _init_namespace method
+    - Misc bugfixes
+
+0.06 Mon August 20, 2001 15:55:50
     - Correction of an "undefined value" bug when lock method was called without
       arguments.
     - Forcing default lock to LOCK_EX
 
-0.05 Tue Jully  03, 2001 17:41:30
+0.05 Tue Jully 03, 2001 17:41:30
     - Implementation of timeout in lock method and integration of it in all
       public methods
     - Bug fix, mispelling of DESCRIPTION section in documentation (make warning 
